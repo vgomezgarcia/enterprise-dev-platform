@@ -1,0 +1,727 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: >
+  DEV/TEST environment created with AWS CloudFormation.
+  Creates a VPC, public subnet, Internet Gateway,
+  route table, Security Group, and Amazon Linux 2023
+  EC2 Apache web server.
+  Apache is configured to start automatically at boot.
+
+
+# ============================================================
+# PARAMETERS
+# ============================================================
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: DEV
+
+    AllowedValues:
+      - DEV
+      - TEST
+
+    Description: Environment name.
+
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+
+    AllowedValues:
+      - t3.micro
+      - t3.small
+
+    Description: EC2 instance type.
+
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+    Description: Latest Amazon Linux 2023 AMI.
+
+
+# ============================================================
+# RESOURCES
+# ============================================================
+
+Resources:
+
+
+  # ==========================================================
+  # VPC
+  # ==========================================================
+
+  DevVPC:
+    Type: AWS::EC2::VPC
+
+    Properties:
+
+      CidrBlock: 10.10.0.0/16
+
+      EnableDnsSupport: true
+
+      EnableDnsHostnames: true
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-VPC"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+
+  # ==========================================================
+  # INTERNET GATEWAY
+  # ==========================================================
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+    Properties:
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-IGW"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+
+  # ==========================================================
+  # ATTACH INTERNET GATEWAY
+  # ==========================================================
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+
+    Properties:
+
+      VpcId: !Ref DevVPC
+
+      InternetGatewayId: !Ref InternetGateway
+
+
+
+  # ==========================================================
+  # PUBLIC SUBNET
+  # ==========================================================
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+
+    Properties:
+
+      VpcId: !Ref DevVPC
+
+      CidrBlock: 10.10.1.0/24
+
+      MapPublicIpOnLaunch: true
+
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs ''
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Public-Subnet"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+
+  # ==========================================================
+  # PUBLIC ROUTE TABLE
+  # ==========================================================
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+
+    Properties:
+
+      VpcId: !Ref DevVPC
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Public-RT"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+
+  # ==========================================================
+  # DEFAULT ROUTE
+  # ==========================================================
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+
+    DependsOn:
+
+      - AttachGateway
+
+    Properties:
+
+      RouteTableId: !Ref PublicRouteTable
+
+      DestinationCidrBlock: 0.0.0.0/0
+
+      GatewayId: !Ref InternetGateway
+
+
+
+  # ==========================================================
+  # SUBNET / ROUTE TABLE ASSOCIATION
+  # ==========================================================
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+
+    Properties:
+
+      SubnetId: !Ref PublicSubnet
+
+      RouteTableId: !Ref PublicRouteTable
+
+
+
+  # ==========================================================
+  # WEB SECURITY GROUP
+  # ==========================================================
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+
+    Properties:
+
+      GroupDescription: Allow HTTP traffic
+
+      VpcId: !Ref DevVPC
+
+
+      SecurityGroupIngress:
+
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+
+      SecurityGroupEgress:
+
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Web-SG"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+
+
+  # ==========================================================
+  # EC2 WEB SERVER
+  # ==========================================================
+
+  WebServer:
+    Type: AWS::EC2::Instance
+
+
+    # --------------------------------------------------------
+    # Wait until the public network path is ready.
+    # --------------------------------------------------------
+
+    DependsOn:
+
+      - DefaultRoute
+
+      - PublicSubnetRouteTableAssociation
+
+
+    Properties:
+
+      InstanceType: !Ref InstanceType
+
+      ImageId: !Ref LatestAmiId
+
+      SubnetId: !Ref PublicSubnet
+
+
+      SecurityGroupIds:
+
+        - !Ref WebSecurityGroup
+
+
+      Tags:
+
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-Web-Server"
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+        - Key: AutoShutdown
+          Value: "true"
+
+
+
+      # ======================================================
+      # USER DATA
+      # ======================================================
+
+      UserData:
+
+        Fn::Base64:
+
+          !Sub |
+            #!/bin/bash
+
+
+            # =================================================
+            # LOG ALL USER DATA OUTPUT
+            # =================================================
+
+            exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+
+
+            echo "=================================================="
+
+            echo "Starting ${EnvironmentName} initialization"
+
+            echo "=================================================="
+
+
+            # =================================================
+            # WAIT FOR NETWORK
+            # =================================================
+
+            echo "Waiting for network initialization..."
+
+            sleep 20
+
+
+            # =================================================
+            # TEST INTERNET CONNECTIVITY
+            # =================================================
+
+            NETWORK_READY=false
+
+
+            for i in 1 2 3 4 5
+            do
+
+                echo "Network test attempt $i"
+
+
+                if curl \
+                    --silent \
+                    --head \
+                    --fail \
+                    --connect-timeout 5 \
+                    https://aws.amazon.com \
+                    > /dev/null
+
+                then
+
+                    NETWORK_READY=true
+
+                    echo "Internet connectivity is available."
+
+                    break
+
+                fi
+
+
+                echo "Internet connectivity not ready."
+
+                sleep 10
+
+            done
+
+
+            if [ "$NETWORK_READY" != "true" ]
+            then
+
+                echo "WARNING: Internet test did not succeed."
+
+                echo "Continuing with package installation attempts."
+
+            fi
+
+
+            # =================================================
+            # INSTALL APACHE
+            # =================================================
+
+            INSTALL_SUCCESS=false
+
+
+            for i in 1 2 3 4 5
+            do
+
+                echo "Apache installation attempt $i"
+
+
+                if dnf install -y httpd
+                then
+
+                    INSTALL_SUCCESS=true
+
+                    echo "Apache installation succeeded."
+
+                    break
+
+                fi
+
+
+                echo "Apache installation failed."
+
+                echo "Waiting 15 seconds..."
+
+                sleep 15
+
+            done
+
+
+            # =================================================
+            # VERIFY HTTPD PACKAGE
+            # =================================================
+
+            if [ "$INSTALL_SUCCESS" != "true" ]
+            then
+
+                echo "ERROR: Apache installation failed."
+
+                exit 1
+
+            fi
+
+
+            if ! rpm -q httpd
+            then
+
+                echo "ERROR: httpd RPM package not found."
+
+                exit 1
+
+            fi
+
+
+            echo "Apache package verified."
+
+
+            # =================================================
+            # CREATE WEB PAGE
+            # =================================================
+
+            cat > /var/www/html/index.html <<EOF
+
+            <!DOCTYPE html>
+
+            <html>
+
+            <head>
+
+                <meta charset="UTF-8">
+
+                <title>${EnvironmentName} Environment</title>
+
+            </head>
+
+
+            <body style="
+                font-family: Arial, sans-serif;
+                text-align: center;
+                margin-top: 100px;
+                background-color: #f4f4f4;
+            ">
+
+
+                <h1>${EnvironmentName} Environment</h1>
+
+
+                <h2>
+                    AWS CloudFormation Web Server
+                </h2>
+
+
+                <p>
+                    Amazon Linux 2023
+                </p>
+
+
+                <p>
+                    Apache HTTP Server
+                </p>
+
+
+                <p>
+                    Apache is configured to start automatically
+                    whenever the EC2 instance boots.
+                </p>
+
+
+            </body>
+
+            </html>
+
+
+            EOF
+
+
+            # =================================================
+            # IMPORTANT IMPROVEMENT
+            #
+            # Reload systemd unit definitions.
+            #
+            # This ensures systemd is aware of the installed
+            # httpd.service unit.
+            # =================================================
+
+            echo "Reloading systemd configuration..."
+
+            systemctl daemon-reload
+
+
+            # =================================================
+            # ENABLE APACHE AT BOOT
+            #
+            # This is the command responsible for automatic
+            # startup after:
+            #
+            # - EC2 reboot
+            # - EC2 stop/start
+            # - Linux operating system restart
+            # =================================================
+
+            echo "Enabling Apache at boot..."
+
+            systemctl enable httpd
+
+
+            # =================================================
+            # VERIFY ENABLE STATUS
+            # =================================================
+
+            if systemctl is-enabled --quiet httpd
+            then
+
+                echo "SUCCESS: Apache is enabled at boot."
+
+            else
+
+                echo "ERROR: Apache could not be enabled."
+
+                systemctl status httpd --no-pager || true
+
+                exit 1
+
+            fi
+
+
+            # =================================================
+            # START APACHE NOW
+            # =================================================
+
+            echo "Starting Apache..."
+
+            systemctl start httpd
+
+
+            # =================================================
+            # VERIFY CURRENT STATUS
+            # =================================================
+
+            sleep 2
+
+
+            if systemctl is-active --quiet httpd
+            then
+
+                echo "SUCCESS: Apache is active."
+
+            else
+
+                echo "ERROR: Apache failed to start."
+
+                systemctl status httpd --no-pager || true
+
+                journalctl -u httpd --no-pager -n 100 || true
+
+                exit 1
+
+            fi
+
+
+            # =================================================
+            # VERIFY APACHE CONFIGURATION
+            # =================================================
+
+            echo "Checking Apache configuration..."
+
+
+            if apachectl configtest
+            then
+
+                echo "SUCCESS: Apache configuration is valid."
+
+            else
+
+                echo "ERROR: Apache configuration contains errors."
+
+                exit 1
+
+            fi
+
+
+            # =================================================
+            # DISPLAY SERVICE INFORMATION
+            # =================================================
+
+            echo "--------------------------------------------------"
+
+            echo "Apache enabled state:"
+
+            systemctl is-enabled httpd
+
+            echo "--------------------------------------------------"
+
+            echo "Apache active state:"
+
+            systemctl is-active httpd
+
+            echo "--------------------------------------------------"
+
+            systemctl status httpd --no-pager
+
+            echo "--------------------------------------------------"
+
+
+            # =================================================
+            # CHECK TCP 80
+            # =================================================
+
+            echo "Checking TCP port 80..."
+
+            ss -lntp | grep ':80' || true
+
+
+            # =================================================
+            # LOCAL HTTP TEST
+            # =================================================
+
+            echo "Testing Apache locally..."
+
+            sleep 3
+
+
+            if curl \
+                --fail \
+                --silent \
+                http://localhost/ \
+                > /dev/null
+
+            then
+
+                echo "SUCCESS: Local HTTP test passed."
+
+            else
+
+                echo "ERROR: Local HTTP test failed."
+
+                exit 1
+
+            fi
+
+
+            # =================================================
+            # FINAL RESULT
+            # =================================================
+
+            echo "=================================================="
+
+            echo "${EnvironmentName} initialization completed."
+
+            echo ""
+
+            echo "Apache installed:      SUCCESS"
+
+            echo "Apache enabled at boot: SUCCESS"
+
+            echo "Apache active now:      SUCCESS"
+
+            echo "HTTP test:              SUCCESS"
+
+            echo ""
+
+            echo "=================================================="
+
+
+# ============================================================
+# OUTPUTS
+# ============================================================
+
+Outputs:
+
+  VpcId:
+
+    Description: VPC ID
+
+    Value: !Ref DevVPC
+
+
+  PublicSubnetId:
+
+    Description: Public subnet ID
+
+    Value: !Ref PublicSubnet
+
+
+  WebSecurityGroupId:
+
+    Description: Web Security Group ID
+
+    Value: !Ref WebSecurityGroup
+
+
+  EC2InstanceId:
+
+    Description: EC2 Instance ID
+
+    Value: !Ref WebServer
+
+
+  PublicIP:
+
+    Description: EC2 public IPv4 address
+
+    Value: !GetAtt WebServer.PublicIp
+
+
+  PublicDNS:
+
+    Description: EC2 public DNS hostname
+
+    Value: !GetAtt WebServer.PublicDnsName
+
+
+  WebsiteURL:
+
+    Description: Apache website URL
+
+    Value: !Sub "http://${WebServer.PublicDnsName}"

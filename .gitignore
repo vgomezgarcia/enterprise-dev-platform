@@ -1,0 +1,21 @@
+# AWS / Credentials
+*.pem
+*.ppk
+.env
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# Visual Studio Code
+.vscode/
