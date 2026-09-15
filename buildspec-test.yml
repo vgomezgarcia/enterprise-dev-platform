@@ -1,0 +1,31 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Installing test tools"
+      - python --version
+      - pip install cfn-lint
+
+  pre_build:
+    commands:
+      - echo "Starting Enterprise DEV tests"
+      - test -f Infrastructure/dev-environment.yaml
+      - test -f Scripts/bootstrap.sh
+      - test -f Apache/httpd.conf
+      - test -f Application/index.html
+
+  build:
+    commands:
+      - echo "Testing CloudFormation"
+      - cfn-lint Infrastructure/dev-environment.yaml
+
+      - echo "Testing bootstrap script syntax"
+      - bash -n Scripts/bootstrap.sh
+
+      - echo "Checking HTML"
+      - grep -q "<html" Application/index.html || grep -q "<!DOCTYPE html" Application/index.html
+
+  post_build:
+    commands:
+      - echo "All Enterprise DEV tests passed"
