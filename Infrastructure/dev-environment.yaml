@@ -1,11 +1,13 @@
 AWSTemplateFormatVersion: '2010-09-09'
 
 Description: >
-  DEV/TEST environment created with AWS CloudFormation.
-  Creates a VPC, public subnet, Internet Gateway,
-  route table, Security Group, and Amazon Linux 2023
+  Enterprise DEV/TEST environment created with AWS CloudFormation.
+  Creates a VPC, public subnet, Internet Gateway, route table,
+  Security Group, IAM Role, Instance Profile, and Amazon Linux 2023
   EC2 Apache web server.
-  Apache is configured to start automatically at boot.
+  EC2 downloads versioned Apache configuration and application
+  artifacts automatically from Amazon S3.
+  AWS Systems Manager Session Manager is used instead of SSH.
 
 
 # ============================================================
@@ -13,6 +15,10 @@ Description: >
 # ============================================================
 
 Parameters:
+
+  # ----------------------------------------------------------
+  # ENVIRONMENT
+  # ----------------------------------------------------------
 
   EnvironmentName:
     Type: String
@@ -25,6 +31,10 @@ Parameters:
     Description: Environment name.
 
 
+  # ----------------------------------------------------------
+  # EC2 INSTANCE TYPE
+  # ----------------------------------------------------------
+
   InstanceType:
     Type: String
     Default: t3.micro
@@ -36,12 +46,63 @@ Parameters:
     Description: EC2 instance type.
 
 
+  # ----------------------------------------------------------
+  # AMAZON LINUX 2023 AMI
+  # ----------------------------------------------------------
+
   LatestAmiId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
 
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 
     Description: Latest Amazon Linux 2023 AMI.
+
+
+  # ----------------------------------------------------------
+  # S3 ARTIFACT BUCKET
+  #
+  # Example:
+  # enterprise-dev-artifacts
+  # ----------------------------------------------------------
+
+  ArtifactBucketName:
+    Type: String
+
+    Default: enterprise-dev-artifacts
+
+    Description: >
+      S3 bucket containing approved Apache configuration
+      and application artifacts.
+
+
+  # ----------------------------------------------------------
+  # APPLICATION RELEASE
+  #
+  # Examples:
+  #
+  # v1.0.0
+  # v1.0.1
+  # v2.1.0
+  #
+  # EC2 will download:
+  #
+  # releases/v1.0.0/httpd.conf
+  # releases/v1.0.0/index.html
+  # ----------------------------------------------------------
+
+  ReleaseVersion:
+    Type: String
+
+    Default: v1.0.0
+
+    AllowedPattern: '^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+    ConstraintDescription: >
+      ReleaseVersion must use semantic version format such as v1.0.0.
+
+    Description: >
+      Version of the Apache configuration and application
+      artifacts to deploy.
 
 
 # ============================================================
@@ -74,6 +135,8 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+        - Key: ManagedBy
+          Value: CloudFormation
 
 
   # ==========================================================
@@ -93,10 +156,12 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+        - Key: ManagedBy
+          Value: CloudFormation
 
 
   # ==========================================================
-  # ATTACH INTERNET GATEWAY
+  # INTERNET GATEWAY ATTACHMENT
   # ==========================================================
 
   AttachGateway:
@@ -107,7 +172,6 @@ Resources:
       VpcId: !Ref DevVPC
 
       InternetGatewayId: !Ref InternetGateway
-
 
 
   # ==========================================================
@@ -137,6 +201,8 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+        - Key: ManagedBy
+          Value: CloudFormation
 
 
   # ==========================================================
@@ -158,17 +224,18 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+        - Key: ManagedBy
+          Value: CloudFormation
 
 
   # ==========================================================
-  # DEFAULT ROUTE
+  # DEFAULT INTERNET ROUTE
   # ==========================================================
 
   DefaultRoute:
     Type: AWS::EC2::Route
 
     DependsOn:
-
       - AttachGateway
 
     Properties:
@@ -178,7 +245,6 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
 
       GatewayId: !Ref InternetGateway
-
 
 
   # ==========================================================
@@ -195,9 +261,14 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
 
 
-
   # ==========================================================
-  # WEB SECURITY GROUP
+  # SECURITY GROUP
+  #
+  # No SSH port 22 is opened.
+  #
+  # Administration is performed through:
+  #
+  # AWS Systems Manager Session Manager
   # ==========================================================
 
   WebSecurityGroup:
@@ -205,7 +276,7 @@ Resources:
 
     Properties:
 
-      GroupDescription: Allow HTTP traffic
+      GroupDescription: Allow HTTP traffic to DEV TEST web server
 
       VpcId: !Ref DevVPC
 
@@ -232,6 +303,129 @@ Resources:
         - Key: Environment
           Value: !Ref EnvironmentName
 
+        - Key: ManagedBy
+          Value: CloudFormation
+
+
+  # ==========================================================
+  # EC2 IAM ROLE
+  #
+  # Responsibilities:
+  #
+  # 1. Systems Manager / Session Manager.
+  # 2. Read approved release artifacts from S3.
+  #
+  # No AWS access keys are stored on EC2.
+  # ==========================================================
+
+  WebServerRole:
+    Type: AWS::IAM::Role
+
+    Properties:
+
+      AssumeRolePolicyDocument:
+
+        Version: '2012-10-17'
+
+        Statement:
+
+          - Effect: Allow
+
+            Principal:
+
+              Service:
+                - ec2.amazonaws.com
+
+            Action:
+              - sts:AssumeRole
+
+
+      # ------------------------------------------------------
+      # SYSTEMS MANAGER
+      # ------------------------------------------------------
+
+      ManagedPolicyArns:
+
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+
+      # ------------------------------------------------------
+      # S3 LEAST-PRIVILEGE ACCESS
+      # ------------------------------------------------------
+
+      Policies:
+
+        - PolicyName: EnterpriseDevArtifactsReadAccess
+
+          PolicyDocument:
+
+            Version: '2012-10-17'
+
+            Statement:
+
+              # ------------------------------------------------
+              # LIST APPROVED RELEASES
+              # ------------------------------------------------
+
+              - Sid: ListApprovedReleases
+
+                Effect: Allow
+
+                Action:
+                  - s3:ListBucket
+
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucketName}"
+
+                Condition:
+
+                  StringLike:
+
+                    s3:prefix:
+                      - "releases/*"
+
+
+              # ------------------------------------------------
+              # DOWNLOAD APPROVED RELEASE OBJECTS
+              # ------------------------------------------------
+
+              - Sid: ReadApprovedArtifacts
+
+                Effect: Allow
+
+                Action:
+                  - s3:GetObject
+
+                Resource:
+                  - !Sub "arn:aws:s3:::${ArtifactBucketName}/releases/*"
+
+
+      Tags:
+
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+        - Key: ManagedBy
+          Value: CloudFormation
+
+
+  # ==========================================================
+  # IAM INSTANCE PROFILE
+  #
+  # Role
+  #   ↓
+  # Instance Profile
+  #   ↓
+  # EC2
+  # ==========================================================
+
+  WebServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+
+    Properties:
+
+      Roles:
+        - !Ref WebServerRole
 
 
   # ==========================================================
@@ -243,7 +437,7 @@ Resources:
 
 
     # --------------------------------------------------------
-    # Wait until the public network path is ready.
+    # Wait for Internet routing before EC2 is created.
     # --------------------------------------------------------
 
     DependsOn:
@@ -255,6 +449,11 @@ Resources:
 
     Properties:
 
+
+      # ------------------------------------------------------
+      # INSTANCE CONFIGURATION
+      # ------------------------------------------------------
+
       InstanceType: !Ref InstanceType
 
       ImageId: !Ref LatestAmiId
@@ -262,10 +461,25 @@ Resources:
       SubnetId: !Ref PublicSubnet
 
 
+      # ------------------------------------------------------
+      # IAM INSTANCE PROFILE
+      # ------------------------------------------------------
+
+      IamInstanceProfile: !Ref WebServerInstanceProfile
+
+
+      # ------------------------------------------------------
+      # SECURITY GROUP
+      # ------------------------------------------------------
+
       SecurityGroupIds:
 
         - !Ref WebSecurityGroup
 
+
+      # ------------------------------------------------------
+      # TAGS
+      # ------------------------------------------------------
 
       Tags:
 
@@ -278,398 +492,289 @@ Resources:
         - Key: AutoShutdown
           Value: "true"
 
+        - Key: ReleaseVersion
+          Value: !Ref ReleaseVersion
+
+        - Key: ManagedBy
+          Value: CloudFormation
 
 
       # ======================================================
       # USER DATA
+      #
+      # Runs during first boot of a NEW EC2 instance.
+      #
+      # EC2 downloads:
+      #
+      # releases/${ReleaseVersion}/httpd.conf
+      # releases/${ReleaseVersion}/index.html
+      #
+      # Improvements:
+      #
+      # - strict Bash error handling
+      # - centralized logging
+      # - S3 download retries
+      # - Apache configuration validation
+      # - runtime verification
       # ======================================================
 
       UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
 
-        Fn::Base64:
+          exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 
-          !Sub |
-            #!/bin/bash
-
-
-            # =================================================
-            # LOG ALL USER DATA OUTPUT
-            # =================================================
-
-            exec > >(tee /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
-
-
-            echo "=================================================="
-
-            echo "Starting ${EnvironmentName} initialization"
-
-            echo "=================================================="
+          echo "=================================================="
+          echo "Starting ${EnvironmentName} deployment"
+          echo "Artifact Bucket: ${ArtifactBucketName}"
+          echo "Release Version: ${ReleaseVersion}"
+          echo "=================================================="
 
 
-            # =================================================
-            # WAIT FOR NETWORK
-            # =================================================
+          # ==================================================
+          # WAIT FOR NETWORK INITIALIZATION
+          # ==================================================
 
-            echo "Waiting for network initialization..."
+          echo "Waiting for network initialization..."
 
-            sleep 20
-
-
-            # =================================================
-            # TEST INTERNET CONNECTIVITY
-            # =================================================
-
-            NETWORK_READY=false
+          sleep 20
 
 
-            for i in 1 2 3 4 5
-            do
+          # ==================================================
+          # VERIFY INSTANCE IDENTITY / IAM
+          # ==================================================
 
-                echo "Network test attempt $i"
+          echo "Checking AWS CLI..."
 
-
-                if curl \
-                    --silent \
-                    --head \
-                    --fail \
-                    --connect-timeout 5 \
-                    https://aws.amazon.com \
-                    > /dev/null
-
-                then
-
-                    NETWORK_READY=true
-
-                    echo "Internet connectivity is available."
-
-                    break
-
-                fi
+          aws --version
 
 
-                echo "Internet connectivity not ready."
+          echo "Checking EC2 IAM identity..."
+
+          aws sts get-caller-identity
+
+
+          # ==================================================
+          # INSTALL APACHE
+          # ==================================================
+
+          echo "Installing Apache HTTP Server..."
+
+          dnf install -y httpd
+
+
+          # ==================================================
+          # VERIFY APACHE PACKAGE
+          # ==================================================
+
+          echo "Verifying Apache installation..."
+
+          rpm -q httpd
+
+
+          # ==================================================
+          # S3 DOWNLOAD FUNCTION
+          #
+          # Retry each download up to 5 times.
+          # This protects bootstrap against temporary network
+          # or S3 connectivity delays during first boot.
+          # ==================================================
+
+          download_s3_object() {
+
+            SOURCE_URI="$1"
+
+            DESTINATION="$2"
+
+            ATTEMPT=1
+
+            MAX_ATTEMPTS=5
+
+
+            while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+
+              echo "Download attempt $ATTEMPT of $MAX_ATTEMPTS"
+
+              echo "Source: $SOURCE_URI"
+
+              echo "Destination: $DESTINATION"
+
+
+              if aws s3 cp "$SOURCE_URI" "$DESTINATION"; then
+
+                echo "Download completed successfully."
+
+                return 0
+
+              fi
+
+
+              echo "Download attempt $ATTEMPT failed."
+
+              ATTEMPT=$((ATTEMPT + 1))
+
+
+              if [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; then
+
+                echo "Waiting 10 seconds before retry..."
 
                 sleep 10
 
-            done
-
-
-            if [ "$NETWORK_READY" != "true" ]
-            then
-
-                echo "WARNING: Internet test did not succeed."
-
-                echo "Continuing with package installation attempts."
-
-            fi
-
-
-            # =================================================
-            # INSTALL APACHE
-            # =================================================
-
-            INSTALL_SUCCESS=false
-
-
-            for i in 1 2 3 4 5
-            do
-
-                echo "Apache installation attempt $i"
-
-
-                if dnf install -y httpd
-                then
-
-                    INSTALL_SUCCESS=true
-
-                    echo "Apache installation succeeded."
-
-                    break
-
-                fi
-
-
-                echo "Apache installation failed."
-
-                echo "Waiting 15 seconds..."
-
-                sleep 15
+              fi
 
             done
 
 
-            # =================================================
-            # VERIFY HTTPD PACKAGE
-            # =================================================
+            echo "ERROR: Unable to download $SOURCE_URI"
 
-            if [ "$INSTALL_SUCCESS" != "true" ]
-            then
+            return 1
+          }
 
-                echo "ERROR: Apache installation failed."
 
-                exit 1
+          # ==================================================
+          # DOWNLOAD APACHE CONFIGURATION
+          # ==================================================
 
-            fi
+          echo "Downloading Apache configuration..."
 
+          download_s3_object \
+            "s3://${ArtifactBucketName}/releases/${ReleaseVersion}/httpd.conf" \
+            "/etc/httpd/conf/httpd.conf"
 
-            if ! rpm -q httpd
-            then
 
-                echo "ERROR: httpd RPM package not found."
+          # ==================================================
+          # DOWNLOAD APPLICATION
+          # ==================================================
 
-                exit 1
+          echo "Downloading application..."
 
-            fi
+          download_s3_object \
+            "s3://${ArtifactBucketName}/releases/${ReleaseVersion}/index.html" \
+            "/var/www/html/index.html"
 
 
-            echo "Apache package verified."
+          # ==================================================
+          # VERIFY DOWNLOADED FILES
+          # ==================================================
 
+          echo "Verifying downloaded files..."
 
-            # =================================================
-            # CREATE WEB PAGE
-            # =================================================
+          test -s /etc/httpd/conf/httpd.conf
 
-            cat > /var/www/html/index.html <<EOF
+          test -s /var/www/html/index.html
 
-            <!DOCTYPE html>
 
-            <html>
+          echo "Downloaded files verified."
 
-            <head>
 
-                <meta charset="UTF-8">
+          # ==================================================
+          # FILE INFORMATION
+          # ==================================================
 
-                <title>${EnvironmentName} Environment</title>
+          echo "Apache configuration file:"
 
-            </head>
+          ls -lh /etc/httpd/conf/httpd.conf
 
 
-            <body style="
-                font-family: Arial, sans-serif;
-                text-align: center;
-                margin-top: 100px;
-                background-color: #f4f4f4;
-            ">
+          echo "Application file:"
 
+          ls -lh /var/www/html/index.html
 
-                <h1>${EnvironmentName} Environment</h1>
 
+          # ==================================================
+          # VALIDATE APACHE CONFIGURATION
+          #
+          # Apache will not be restarted if httpd.conf
+          # contains a syntax error.
+          # ==================================================
 
-                <h2>
-                    AWS CloudFormation Web Server
-                </h2>
+          echo "Validating Apache configuration..."
 
+          apachectl configtest
 
-                <p>
-                    Amazon Linux 2023
-                </p>
 
+          # ==================================================
+          # SYSTEMD
+          # ==================================================
 
-                <p>
-                    Apache HTTP Server
-                </p>
+          echo "Reloading systemd..."
 
+          systemctl daemon-reload
 
-                <p>
-                    Apache is configured to start automatically
-                    whenever the EC2 instance boots.
-                </p>
 
+          # ==================================================
+          # ENABLE APACHE AT BOOT
+          # ==================================================
 
-            </body>
+          echo "Enabling Apache at boot..."
 
-            </html>
+          systemctl enable httpd
 
 
-            EOF
+          # ==================================================
+          # START / RESTART APACHE
+          # ==================================================
 
+          echo "Starting Apache..."
 
-            # =================================================
-            # IMPORTANT IMPROVEMENT
-            #
-            # Reload systemd unit definitions.
-            #
-            # This ensures systemd is aware of the installed
-            # httpd.service unit.
-            # =================================================
+          systemctl restart httpd
 
-            echo "Reloading systemd configuration..."
 
-            systemctl daemon-reload
+          # ==================================================
+          # VERIFY ENABLED STATE
+          # ==================================================
 
+          echo "Checking Apache boot configuration..."
 
-            # =================================================
-            # ENABLE APACHE AT BOOT
-            #
-            # This is the command responsible for automatic
-            # startup after:
-            #
-            # - EC2 reboot
-            # - EC2 stop/start
-            # - Linux operating system restart
-            # =================================================
+          systemctl is-enabled httpd
 
-            echo "Enabling Apache at boot..."
 
-            systemctl enable httpd
+          # ==================================================
+          # VERIFY ACTIVE STATE
+          # ==================================================
 
+          echo "Checking Apache runtime state..."
 
-            # =================================================
-            # VERIFY ENABLE STATUS
-            # =================================================
+          systemctl is-active httpd
 
-            if systemctl is-enabled --quiet httpd
-            then
 
-                echo "SUCCESS: Apache is enabled at boot."
+          # ==================================================
+          # VERIFY TCP PORT 80
+          # ==================================================
 
-            else
+          echo "Checking TCP port 80..."
 
-                echo "ERROR: Apache could not be enabled."
+          ss -lntp | grep ':80'
 
-                systemctl status httpd --no-pager || true
 
-                exit 1
+          # ==================================================
+          # LOCAL HTTP TEST
+          # ==================================================
 
-            fi
+          echo "Testing Apache locally..."
 
+          sleep 3
 
-            # =================================================
-            # START APACHE NOW
-            # =================================================
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            http://localhost/ \
+            > /dev/null
 
-            echo "Starting Apache..."
 
-            systemctl start httpd
+          # ==================================================
+          # FINAL VERIFICATION
+          # ==================================================
 
+          echo "Apache local HTTP test succeeded."
 
-            # =================================================
-            # VERIFY CURRENT STATUS
-            # =================================================
 
-            sleep 2
-
-
-            if systemctl is-active --quiet httpd
-            then
-
-                echo "SUCCESS: Apache is active."
-
-            else
-
-                echo "ERROR: Apache failed to start."
-
-                systemctl status httpd --no-pager || true
-
-                journalctl -u httpd --no-pager -n 100 || true
-
-                exit 1
-
-            fi
-
-
-            # =================================================
-            # VERIFY APACHE CONFIGURATION
-            # =================================================
-
-            echo "Checking Apache configuration..."
-
-
-            if apachectl configtest
-            then
-
-                echo "SUCCESS: Apache configuration is valid."
-
-            else
-
-                echo "ERROR: Apache configuration contains errors."
-
-                exit 1
-
-            fi
-
-
-            # =================================================
-            # DISPLAY SERVICE INFORMATION
-            # =================================================
-
-            echo "--------------------------------------------------"
-
-            echo "Apache enabled state:"
-
-            systemctl is-enabled httpd
-
-            echo "--------------------------------------------------"
-
-            echo "Apache active state:"
-
-            systemctl is-active httpd
-
-            echo "--------------------------------------------------"
-
-            systemctl status httpd --no-pager
-
-            echo "--------------------------------------------------"
-
-
-            # =================================================
-            # CHECK TCP 80
-            # =================================================
-
-            echo "Checking TCP port 80..."
-
-            ss -lntp | grep ':80' || true
-
-
-            # =================================================
-            # LOCAL HTTP TEST
-            # =================================================
-
-            echo "Testing Apache locally..."
-
-            sleep 3
-
-
-            if curl \
-                --fail \
-                --silent \
-                http://localhost/ \
-                > /dev/null
-
-            then
-
-                echo "SUCCESS: Local HTTP test passed."
-
-            else
-
-                echo "ERROR: Local HTTP test failed."
-
-                exit 1
-
-            fi
-
-
-            # =================================================
-            # FINAL RESULT
-            # =================================================
-
-            echo "=================================================="
-
-            echo "${EnvironmentName} initialization completed."
-
-            echo ""
-
-            echo "Apache installed:      SUCCESS"
-
-            echo "Apache enabled at boot: SUCCESS"
-
-            echo "Apache active now:      SUCCESS"
-
-            echo "HTTP test:              SUCCESS"
-
-            echo ""
-
-            echo "=================================================="
+          echo "=================================================="
+          echo "${EnvironmentName} deployment completed successfully"
+          echo "Release: ${ReleaseVersion}"
+          echo "=================================================="
 
 
 # ============================================================
@@ -678,12 +783,21 @@ Resources:
 
 Outputs:
 
+
+  # ----------------------------------------------------------
+  # VPC
+  # ----------------------------------------------------------
+
   VpcId:
 
     Description: VPC ID
 
     Value: !Ref DevVPC
 
+
+  # ----------------------------------------------------------
+  # PUBLIC SUBNET
+  # ----------------------------------------------------------
 
   PublicSubnetId:
 
@@ -692,12 +806,42 @@ Outputs:
     Value: !Ref PublicSubnet
 
 
+  # ----------------------------------------------------------
+  # SECURITY GROUP
+  # ----------------------------------------------------------
+
   WebSecurityGroupId:
 
     Description: Web Security Group ID
 
     Value: !Ref WebSecurityGroup
 
+
+  # ----------------------------------------------------------
+  # EC2 IAM ROLE
+  # ----------------------------------------------------------
+
+  WebServerRoleName:
+
+    Description: IAM Role used by the EC2 web server
+
+    Value: !Ref WebServerRole
+
+
+  # ----------------------------------------------------------
+  # INSTANCE PROFILE
+  # ----------------------------------------------------------
+
+  WebServerInstanceProfileName:
+
+    Description: EC2 IAM Instance Profile
+
+    Value: !Ref WebServerInstanceProfile
+
+
+  # ----------------------------------------------------------
+  # EC2 INSTANCE
+  # ----------------------------------------------------------
 
   EC2InstanceId:
 
@@ -706,12 +850,20 @@ Outputs:
     Value: !Ref WebServer
 
 
+  # ----------------------------------------------------------
+  # PUBLIC IPV4
+  # ----------------------------------------------------------
+
   PublicIP:
 
     Description: EC2 public IPv4 address
 
     Value: !GetAtt WebServer.PublicIp
 
+
+  # ----------------------------------------------------------
+  # PUBLIC DNS
+  # ----------------------------------------------------------
 
   PublicDNS:
 
@@ -720,8 +872,34 @@ Outputs:
     Value: !GetAtt WebServer.PublicDnsName
 
 
+  # ----------------------------------------------------------
+  # WEBSITE
+  # ----------------------------------------------------------
+
   WebsiteURL:
 
     Description: Apache website URL
 
     Value: !Sub "http://${WebServer.PublicDnsName}"
+
+
+  # ----------------------------------------------------------
+  # DEPLOYED RELEASE
+  # ----------------------------------------------------------
+
+  DeployedRelease:
+
+    Description: Artifact release deployed to EC2
+
+    Value: !Ref ReleaseVersion
+
+
+  # ----------------------------------------------------------
+  # ARTIFACT BUCKET
+  # ----------------------------------------------------------
+
+  ArtifactBucket:
+
+    Description: S3 artifact bucket used by EC2
+
+    Value: !Ref ArtifactBucketName
