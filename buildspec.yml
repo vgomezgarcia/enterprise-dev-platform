@@ -1,0 +1,41 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - echo "Installing validation tools"
+      - python --version
+      - pip install cfn-lint
+
+  pre_build:
+    commands:
+      - echo "========================================="
+      - echo "Enterprise DEV Platform - Validation"
+      - echo "========================================="
+
+      - echo "Checking project files"
+      - test -f Infrastructure/dev-environment.yaml
+      - test -f Scripts/bootstrap.sh
+      - test -f Apache/httpd.conf
+      - test -f Application/index.html
+
+      - echo "Validating CloudFormation template"
+      - cfn-lint Infrastructure/dev-environment.yaml
+
+      - echo "Validating Bash bootstrap script"
+      - bash -n Scripts/bootstrap.sh
+
+  build:
+    commands:
+      - echo "All validation tests passed successfully"
+
+  post_build:
+    commands:
+      - echo "Enterprise DEV validation completed"
+
+artifacts:
+  files:
+    - Infrastructure/dev-environment.yaml
+    - Scripts/bootstrap.sh
+    - Apache/httpd.conf
+    - Application/index.html
