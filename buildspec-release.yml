@@ -1,0 +1,171 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+  pre_build:
+    commands:
+      # =========================================================
+      # Enterprise DEV Platform
+      # Release Pre-Build Phase
+      # =========================================================
+      - echo "=== Enterprise DEV Release - Pre Build ==="
+
+      # =========================================================
+      # DEBUG - Verify RELEASE_VERSION reaches the shell
+      # Expected:
+      # RELEASE_VERSION=v1.2.0
+      # BASH sees RELEASE_VERSION=[v1.2.0]
+      # =========================================================
+      - echo "=== RELEASE VERSION DEBUG ==="
+      - printenv | sort | grep -E 'RELEASE|VERSION' || true
+      - echo "BASH sees RELEASE_VERSION=[$RELEASE_VERSION]"
+      - echo "=== END RELEASE VERSION DEBUG ==="
+
+      # =========================================================
+      # Validate RELEASE_VERSION exists
+      # =========================================================
+      - |
+        if [ -z "$RELEASE_VERSION" ]; then
+          echo "ERROR: RELEASE_VERSION is empty."
+          echo "The release process cannot continue."
+          exit 1
+        fi
+
+      - echo "Release version is $RELEASE_VERSION"
+
+      # =========================================================
+      # Validate semantic version format
+      # Valid examples:
+      # v1.0.0
+      # v1.1.0
+      # v1.2.0
+      # v2.0.0
+      # =========================================================
+      - echo "Validating semantic release version..."
+
+      - |
+        if ! printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "ERROR: RELEASE_VERSION must use semantic version format."
+          echo "Expected example: v1.2.0"
+          echo "Received: [$RELEASE_VERSION]"
+          exit 1
+        fi
+
+      - echo "Semantic version validation passed."
+
+      # =========================================================
+      # Verify required source files
+      # =========================================================
+      - echo "Checking required project files..."
+      - test -f Application/index.html
+      - test -f Apache/httpd.conf
+      - test -f Infrastructure/dev-environment.yaml
+      - test -f Infrastructure/dev-configuration.json
+      - echo "All required project files were found."
+
+      # =========================================================
+      # Immutable Release Check
+      #
+      # A release version must never be overwritten.
+      # Example:
+      # releases/v1.2.0/index.html
+      # releases/v1.2.0/httpd.conf
+      # =========================================================
+      - echo "Checking whether release $RELEASE_VERSION already exists..."
+
+      # Check index.html
+      - |
+        if aws s3api head-object \
+          --bucket enterprise-dev-artifacts \
+          --key "releases/$RELEASE_VERSION/index.html" \
+          > /dev/null 2>&1; then
+          echo "ERROR: Release $RELEASE_VERSION already exists."
+          echo "Object already exists: index.html"
+          echo "Immutable releases cannot be overwritten."
+          exit 1
+        fi
+
+      # Check httpd.conf
+      - |
+        if aws s3api head-object \
+          --bucket enterprise-dev-artifacts \
+          --key "releases/$RELEASE_VERSION/httpd.conf" \
+          > /dev/null 2>&1; then
+          echo "ERROR: Release $RELEASE_VERSION already exists."
+          echo "Object already exists: httpd.conf"
+          echo "Immutable releases cannot be overwritten."
+          exit 1
+        fi
+
+      - echo "Release $RELEASE_VERSION does not exist."
+      - echo "Immutable release validation passed."
+
+  build:
+    commands:
+      # =========================================================
+      # Publish Immutable Release
+      # =========================================================
+      - echo "=== Publishing Enterprise DEV Release ==="
+      - echo "Publishing release $RELEASE_VERSION"
+
+      # =========================================================
+      # Publish Application
+      # =========================================================
+      - echo "Publishing index.html..."
+
+      - >
+        aws s3 cp
+        Application/index.html
+        "s3://enterprise-dev-artifacts/releases/$RELEASE_VERSION/index.html"
+
+      # =========================================================
+      # Publish Apache Configuration
+      # =========================================================
+      - echo "Publishing httpd.conf..."
+
+      - >
+        aws s3 cp
+        Apache/httpd.conf
+        "s3://enterprise-dev-artifacts/releases/$RELEASE_VERSION/httpd.conf"
+
+      # =========================================================
+      # Publish Current CloudFormation Template
+      #
+      # Release artifacts are immutable.
+      #
+      # cloudformation/dev-environment.yaml is intentionally
+      # updated because it represents the current infrastructure
+      # template used by the deployment process.
+      # =========================================================
+      - echo "Publishing CloudFormation template..."
+
+      - >
+        aws s3 cp
+        Infrastructure/dev-environment.yaml
+        "s3://enterprise-dev-artifacts/cloudformation/dev-environment.yaml"
+
+      - echo "All release artifacts published successfully."
+
+  post_build:
+    commands:
+      # =========================================================
+      # Release Summary
+      # =========================================================
+      - echo "=== Enterprise DEV Release completed successfully ==="
+
+      - echo "Release version:"
+      - echo "$RELEASE_VERSION"
+
+      - echo "S3 release location:"
+      - echo "s3://enterprise-dev-artifacts/releases/$RELEASE_VERSION/"
+
+      - echo "Published immutable objects:"
+      - echo "s3://enterprise-dev-artifacts/releases/$RELEASE_VERSION/index.html"
+      - echo "s3://enterprise-dev-artifacts/releases/$RELEASE_VERSION/httpd.conf"
+
+      - echo "Current CloudFormation template:"
+      - echo "s3://enterprise-dev-artifacts/cloudformation/dev-environment.yaml"
+
+      - echo "=== RELEASE SUCCESS ==="
